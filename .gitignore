@@ -1,0 +1,12 @@
+# Bỏ qua môi trường ảo và thư viện
+venv/
+env_drone/
+__pycache__/
+*.pyc
+
+# Bỏ qua các file log hệ thống
+*.log
+*.csv
+
+# Bỏ qua file cấu hình máy tính cá nhân
+.vscode/
