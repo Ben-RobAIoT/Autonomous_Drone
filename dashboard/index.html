@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Drone GCS - Pi 5</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: #e0e0e0; padding: 20px; margin: 0; }
+        h1 { color: #00e676; text-align: center; font-size: 24px; text-transform: uppercase; letter-spacing: 2px; }
+        .grid { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 20px; max-width: 1400px; margin: 0 auto; }
+        .card { background: #1e1e1e; padding: 20px; border-radius: 10px; border: 1px solid #333; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .card h2 { margin-top: 0; font-size: 18px; color: #64b5f6; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        
+        /* Video Stream */
+        .video-container { width: 100%; aspect-ratio: 4/3; background: #000; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; color: #ff5252; font-weight: bold;}
+        .video-container img { width: 100%; height: 100%; object-fit: cover; }
+        
+        /* Check List */
+        .check-item { display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 16px; padding: 8px; background: #2a2a2a; border-radius: 5px;}
+        .status-ok { color: #00e676; font-weight: bold; }
+        .status-warn { color: #ffeb3b; font-weight: bold; }
+        .status-err { color: #ff5252; font-weight: bold; }
+        
+        /* Buttons */
+        .btn { width: 100%; padding: 12px; margin-bottom: 10px; cursor: pointer; border: none; border-radius: 6px; font-weight: bold; font-size: 16px; transition: 0.2s; text-transform: uppercase; }
+        .btn-arm { background: #ff5252; color: white; }
+        .btn-arm:hover { background: #ff1744; }
+        .btn-land { background: #ffea00; color: black; }
+        .btn-land:hover { background: #ffd600; }
+        .btn-disarm { background: #424242; color: white; }
+        .btn-disarm:hover { background: #616161; }
+        
+        /* Logs */
+        #action-logs { height: 150px; overflow-y: auto; background: #000; padding: 10px; font-family: monospace; font-size: 13px; color: #a5d6a7; border-radius: 5px; border: 1px solid #333; }
+        
+        .telemetry-val { font-weight: bold; font-size: 18px; color: #fff; float: right; }
+    </style>
+</head>
+<body>
+
+    <h1>GROUND CONTROL STATION - UAV CONTEST 2026</h1>
+    
+    <div class="grid">
+        <div class="card">
+            <h2>Live FPV (Pi HQ Camera)</h2>
+            <div class="video-container">
+                <img id="video-stream" src="/video_feed" alt="Đang kết nối Camera..." onload="camSuccess()" onerror="camError()">
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>System Check & Telemetry</h2>
+            
+            <div class="check-item">Trạng thái Bay: <span id="state" class="telemetry-val">---</span></div>
+            <div class="check-item">Độ cao (Lidar): <span id="alt" class="telemetry-val">0.0 m</span></div>
+            
+            <h3 style="color: #ccc; font-size: 14px; margin-top: 20px;">PRE-FLIGHT CHECKLIST</h3>
+            <div class="check-item">1. Camera System <span id="chk-cam">Đang chờ...</span></div>
+            <div class="check-item">2. Optical Flow (<span id="flow-val">0</span>) <span id="chk-flow">Đang chờ...</span></div>
+            <div class="check-item">3. Battery (<span id="batt-val">0</span>V) <span id="chk-batt">Đang chờ...</span></div>
+            <div class="check-item">4. Vibration (<span id="vib-val">0</span>) <span id="chk-vib">Đang chờ...</span></div>
+        </div>
+
+        <div class="card">
+            <h2>Control Center</h2>
+            <button class="btn btn-arm" onclick="sendCommand('ARM')">🔥 FORCE ARM</button>
+            <button class="btn btn-land" onclick="sendCommand('LAND')">⏬ AUTO LAND</button>
+            <button class="btn btn-disarm" onclick="sendCommand('DISARM')">🔒 DISARM</button>
+            
+            <h3 style="color: #ccc; font-size: 14px; margin-top: 20px;">ACTION LOGS</h3>
+            <div id="action-logs"></div>
+        </div>
+    </div>
+
+    <script>
+        // --- LOGIC XỬ LÝ NHẬT KÝ HÀNH ĐỘNG ---
+        function addLog(msg) {
+            const logBox = document.getElementById('action-logs');
+            const time = new Date().toLocaleTimeString();
+            logBox.innerHTML += `<div>[${time}] ${msg}</div>`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        // --- LOGIC KIỂM TRA CAMERA ---
+        let cameraOk = false;
+        function camSuccess() {
+            cameraOk = true;
+            document.getElementById('chk-cam').innerHTML = "<span class='status-ok'>OK 🟢</span>";
+        }
+        function camError() {
+            cameraOk = false;
+            document.getElementById('chk-cam').innerHTML = "<span class='status-err'>ERROR 🔴</span>";
+            document.getElementById('video-stream').alt = "Không tìm thấy hoặc không mở được Camera!";
+        }
+
+        // --- LOGIC LẤY DỮ LIỆU VÀ ĐÁNH GIÁ (SYSTEM CHECK) ---
+        function updateTelemetry() {
+            fetch('/telemetry')
+                .then(res => res.json())
+                .then(data => {
+                    // Cập nhật giá trị hiển thị
+                    document.getElementById('state').innerText = data.state;
+                    document.getElementById('alt').innerText = data.alt.toFixed(2) + ' m';
+                    document.getElementById('flow-val').innerText = data.flow_qual;
+                    document.getElementById('batt-val').innerText = data.battery;
+                    document.getElementById('vib-val').innerText = data.vibration;
+
+                    // Đánh giá Hệ thống (Checklist)
+                    // 1. Optical Flow (> 50 là OK)
+                    const flowEl = document.getElementById('chk-flow');
+                    if (data.flow_qual > 50) flowEl.innerHTML = "<span class='status-ok'>OK 🟢</span>";
+                    else if (data.flow_qual > 20) flowEl.innerHTML = "<span class='status-warn'>WARN 🟡</span>";
+                    else flowEl.innerHTML = "<span class='status-err'>LOW 🔴</span>";
+
+                    // 2. Battery (Giả sử pin 3S, > 11.0V là OK)
+                    const battEl = document.getElementById('chk-batt');
+                    if (data.battery > 11.0) battEl.innerHTML = "<span class='status-ok'>OK 🟢</span>";
+                    else if (data.battery > 0) battEl.innerHTML = "<span class='status-err'>LOW 🔴</span>";
+                    else battEl.innerHTML = "<span class='status-err'>N/A 🔴</span>";
+
+                    // 3. Vibration (< 30 là OK)
+                    const vibEl = document.getElementById('chk-vib');
+                    if (data.vibration < 30) vibEl.innerHTML = "<span class='status-ok'>OK 🟢</span>";
+                    else vibEl.innerHTML = "<span class='status-err'>HIGH 🔴</span>";
+                })
+                .catch(err => console.log("Lỗi tải Telemetry", err));
+        }
+
+        // --- GỬI LỆNH ĐIỀU KHIỂN ---
+        function sendCommand(action) {
+            // Kiểm tra an toàn trước khi ARM (tùy chọn)
+            if (action === 'ARM') {
+                const flowQual = parseInt(document.getElementById('flow-val').innerText);
+                if (flowQual < 20 && !confirm("Cảnh báo: Optical Flow rất thấp! Bạn có chắc chắn muốn cất cánh?")) {
+                    addLog("Đã hủy lệnh ARM do thiếu an toàn.");
+                    return;
+                }
+            }
+
+            fetch('/command', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: action})
+            }).then(() => addLog(">>> Đã gửi lệnh: " + action));
+        }
+
+        // Chạy vòng lặp cập nhật mỗi 500ms
+        setInterval(updateTelemetry, 500);
+        addLog("Hệ thống Web GCS đã khởi động.");
+    </script>
+</body>
+</html>

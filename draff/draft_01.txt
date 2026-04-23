@@ -1,0 +1,106 @@
+from pymavlink import mavutil
+import time
+import threading
+
+class SimpleAutoPilot:
+    def __init__(self, port='/dev/ttyAMA0', baud=115200):
+        print("Đang kết nối với Pixhawk...")
+        self.connection = mavutil.mavlink_connection(port, baud=baud)
+        self.connection.wait_heartbeat()
+        print("Đã kết nối thành công!")
+
+        self.current_alt = 0.0
+        self.is_running = True
+
+        # Yêu cầu Pixhawk gửi dữ liệu cảm biến khoảng cách (Lidar) ở tần số cao
+        self.connection.mav.command_long_send(
+            self.connection.target_system, self.connection.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, 132, 50000, 0, 0, 0, 0, 0)
+
+        # Chạy luồng phụ để liên tục cập nhật độ cao
+        threading.Thread(target=self._read_alt_loop, daemon=True).start()
+
+    def _read_alt_loop(self):
+        """Luồng chạy ngầm để lấy độ cao liên tục"""
+        while self.is_running:
+            msg = self.connection.recv_match(type='DISTANCE_SENSOR', blocking=False)
+            if msg:
+                self.current_alt = msg.current_distance / 100.0  # Đổi từ cm sang mét
+            time.sleep(0.05)
+
+    def set_mode(self, mode_name):
+        """Hàm chuyển chế độ bay"""
+        mode_id = self.connection.mode_mapping()[mode_name]
+        self.connection.mav.set_mode_send(
+            self.connection.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode_id)
+
+    def arm(self):
+        print("\n--- CHUẨN BỊ CẤT CÁNH ---")
+        self.set_mode('ALT_HOLD') # Bắt buộc phải là ALT_HOLD
+        time.sleep(1)
+        self.connection.mav.command_long_send(
+            self.connection.target_system, self.connection.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 21196, 0, 0, 0, 0, 0)
+        time.sleep(2)
+        print("Đã Arm động cơ!")
+
+    def disarm(self):
+        self.connection.mav.command_long_send(
+            self.connection.target_system, self.connection.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0)
+        print("Đã khóa động cơ an toàn.")
+
+    def set_climb_rate(self, pwm):
+        """Gửi lệnh tay cầm ảo vào kênh 3"""
+        self.connection.mav.rc_channels_override_send(
+            self.connection.target_system, self.connection.target_component,
+            65535, 65535, int(pwm), 65535, 65535, 65535, 65535, 65535)
+
+    def fly_to_altitude(self, target_alt):
+        """Hàm bay và giữ một độ cao chỉ định"""
+        print(f"\n[AUTO] Bắt đầu di chuyển tới {target_alt}m... (Nhấn Ctrl+C để hạ cánh)")
+        
+        # Kp là hệ số nhạy. Số càng lớn drone đẩy ga càng mạnh khi nhận ra sai số.
+        kp = 150 
+
+        while True:
+            # Bước 1: Tính toán khoảng cách tới mục tiêu
+            error = target_alt - self.current_alt
+
+            # Bước 2: Chuyển đổi sai số thành lực tay cầm (PWM)
+            # Ví dụ: error = 1.0m -> pwm = 1500 + 150 = 1650 (Bay lên vừa phải)
+            # Ví dụ: error = 0.0m -> pwm = 1500 + 0 = 1500 (Giữ yên độ cao)
+            pwm = 1500 + (error * kp)
+
+            # Bước 3: Cắt gọt PWM để đảm bảo không bay quá nhanh (Giới hạn từ 1350 đến 1900)
+            pwm = max(1350, min(1900, pwm))
+
+            # Bước 4: Gửi lệnh và in ra màn hình
+            self.set_climb_rate(pwm)
+            print(f"Độ cao thực: {self.current_alt:.2f}m | Mục tiêu: {target_alt:.2f}m | Tốc độ đẩy (PWM): {int(pwm)}", end='\r')
+            
+            time.sleep(0.05) # Vòng lặp chạy ở 20Hz
+
+# ==========================================
+# KHỐI LỆNH ĐIỀU KHIỂN CHÍNH
+# ==========================================
+if __name__ == '__main__':
+    drone = SimpleAutoPilot()
+    
+    try:
+        input("Nhấn ENTER để cất cánh lên 1.7m...")
+        drone.arm()
+        
+        # Chỉ một dòng duy nhất để bay tới và lơ lửng tại 1.7m
+        drone.fly_to_altitude(1.7)
+        
+    except KeyboardInterrupt:
+        print("\n\n[HẠ CÁNH] Nhận lệnh dừng! Đang từ từ hạ cánh...")
+        # Lệnh hạ cánh tự động của Pixhawk (an toàn tuyệt đối)
+        drone.set_mode('LAND') 
+        
+        # Chờ drone đáp hẳn (bạn có thể theo dõi biến drone.current_alt để biết khi nào chạm đất)
+        time.sleep(4) 
+        drone.disarm()
+        drone.is_running = False

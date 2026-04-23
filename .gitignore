@@ -1,12 +1,13 @@
-# Bỏ qua môi trường ảo và thư viện
+# Bỏ qua môi trường ảo Python
 venv/
-env_drone/
+env/
+
+# Bỏ qua các file rác sinh ra trong quá trình chạy
 __pycache__/
 *.pyc
+*.pyo
 
-# Bỏ qua các file log hệ thống
-*.log
+# Bỏ qua file log và ảnh test
+logs/
 *.csv
-
-# Bỏ qua file cấu hình máy tính cá nhân
-.vscode/
+test_image.jpg

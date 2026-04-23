@@ -5,114 +5,91 @@ import os
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 
-# Import các tham số cấu hình
 from config import SystemConfig, FlightConfig, PIDConfig
-# Import các module lõi
 from core.connection import DroneConnection
 from core.state_machine import FlightState
-# Import module cảm biến và thị giác
 from sensors.monitor import SensorManager
 from sensors.vision import VisionManager
-# Import module điều khiển và nhiệm vụ
 from control.commander import FlightCommander
 from missions.fire_round_2 import FireMission
-# Import module tiện ích
 from utils.logger import FlightLogger
 from utils.safety import SafetyManager
 
-# --- KHỞI TẠO WEB SERVER ---
 app = Flask(__name__, static_folder='dashboard')
 CORS(app)
 
-# Biến toàn cục để chia sẻ dữ liệu giữa Drone logic và Web logic
+# Biến toàn cục
 drone_telemetry = {}
 commander_ptr = None
-vision_ptr = None  # Con trỏ quản lý Camera
-
-# --- CÁC ROUTE PHỤC VỤ DASHBOARD ---
+vision_ptr = None
+current_state = FlightState.IDLE # Đưa ra ngoài để Web có thể sửa đổi
 
 @app.route('/')
 def index():
-    """Trả về giao diện Dashboard từ folder dashboard/index.html"""
     return send_from_directory(app.static_folder, 'index.html')
 
 @app.route('/telemetry')
 def get_telemetry():
-    """API lấy dữ liệu cảm biến thời gian thực cho Web"""
     return jsonify(drone_telemetry)
 
 @app.route('/command', methods=['POST'])
 def send_command():
-    """API nhận lệnh điều khiển từ các nút bấm trên Web"""
+    global current_state
     action = request.json.get('action')
     if action == 'ARM':
         commander_ptr.arm()
+        current_state = FlightState.TAKEOFF # Cập nhật trạng thái bay
     elif action == 'LAND':
         commander_ptr.land_safely()
+        current_state = FlightState.RETURN_LAND
     elif action == 'DISARM':
         commander_ptr.disarm()
+        current_state = FlightState.DISARMED
     return jsonify({"status": "received", "action": action})
 
-# --- LOGIC STREAM VIDEO ---
-
 def gen_frames():
-    """Hàm generator tạo luồng dữ liệu hình ảnh liên tục"""
     while True:
         if vision_ptr:
             frame = vision_ptr.get_encoded_frame()
-            # BẮT BUỘC PHẢI CHECK KHÁC NONE TRƯỚC KHI YIELD
-            if frame is not None:
+            if frame:
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        
-        # Thêm sleep để tránh ngốn 100% CPU của Pi 5
         time.sleep(0.05)
 
 @app.route('/video_feed')
 def video_feed():
-    """Route để Dashboard nhúng vào thẻ <img> để xem live stream"""
-    return Response(gen_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 def run_web_server():
-    """Chạy Web Server ở cổng 5000"""
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
-
-# --- HÀM CHÍNH ĐIỀU KHIỂN DRONE ---
 
 def main():
     global commander_ptr, vision_ptr, drone_telemetry, current_state
     
-    # 1. Khởi tạo các module phần cứng
     drone = DroneConnection(SystemConfig.PORT, SystemConfig.BAUD)
     sensors = SensorManager(drone)
     commander = FlightCommander(drone)
-    vision = VisionManager() # Khởi tạo Camera HQ
+    vision = VisionManager() 
     
-    # Gán con trỏ toàn cục để Web Server có thể truy cập
     commander_ptr = commander
     vision_ptr = vision
     
-    # 2. Khởi tạo tiện ích hỗ trợ
     logger = FlightLogger()
     safety = SafetyManager(commander, sensors)
     fire_mission = FireMission(commander, vision)
-    current_state = FlightState.IDLE
     
-    # 3. Chạy Web Server trong một luồng riêng biệt (Background Thread)
     threading.Thread(target=run_web_server, daemon=True).start()
-    print("[MAIN] Web Server đang chạy tại http://<IP_PI>:5000")
+    print("[MAIN] Web Server đang chạy tại cổng 5000")
     
     time.sleep(2) 
-    print("\n[READY] HỆ THỐNG SẴN SÀNG - ĐIỀU KHIỂN QUA WEB")
+    print("\n[READY] Hệ thống đã sẵn sàng. Vui lòng thao tác trên Web GCS!")
     
     try:
         while True:
             data = sensors.get_all()
+            # Dùng .get() để tránh lỗi nếu key chưa kịp khởi tạo
             current_alt = data.get('alt', 0.0)
-            error = FlightConfig.HOVER_TARGET_ALT - current_alt
-
-            # Cập nhật Telemetry liên tục cho Web
+            
             drone_telemetry = {
                 "state": current_state.name,
                 "alt": round(current_alt, 2),
@@ -121,26 +98,25 @@ def main():
                 "flow_qual": data.get('flow_qual', 0)
             }
             
-            # 2. CHỈ KIỂM TRA AN TOÀN KHI ĐANG BAY
-            if current_state in [FlightState.TAKEOFF, FlightState.MISSION_ACTIVE]:
-                if not safety.check_all():
-                    current_state = FlightState.FAILSAFE
-
-            # 3. NẾU ĐANG CHỜ HOẶC GẶP LỖI -> Không điều khiển động cơ
-            if current_state in [FlightState.IDLE, FlightState.FAILSAFE, FlightState.DISARMED]:
+            # Kiểm tra an toàn
+            if current_state != FlightState.IDLE and not safety.check_all():
+                current_state = FlightState.FAILSAFE
+                
+            # Nếu đang IDLE (chưa bấm nút trên web), chỉ cập nhật Telemetry rồi lặp lại
+            if current_state == FlightState.IDLE:
                 time.sleep(0.1)
                 continue
 
-            # 4. LOGIC BAY KHI ĐÃ ARM & TAKEOFF
+            # --- LOGIC BAY KHI ĐÃ ARM ---
+            error = FlightConfig.HOVER_TARGET_ALT - current_alt
+            
             if abs(error) < 0.2 and current_state == FlightState.TAKEOFF:
                 current_state = FlightState.MISSION_ACTIVE
-                print("\n[MISSION] Đã đạt độ cao. Bắt đầu nhiệm vụ!")
+                print("\n[MISSION] Đã đạt độ cao. Bắt đầu chữa cháy!")
 
-            # Chạy logic nhiệm vụ (Vòng 2)
             if current_state == FlightState.MISSION_ACTIVE:
                 fire_mission.run_step(current_alt)
 
-            # 5. ĐIỀU KHIỂN PID & GỬI LỆNH MAVLINK
             pwm = PIDConfig.PWM_HOVER + (error * PIDConfig.ALT_KP)
             pwm = max(PIDConfig.PWM_MIN, min(PIDConfig.PWM_MAX, pwm))
             
